@@ -203,6 +203,7 @@ class WaypointUpdater(object):
         pass
         
     def upcoming_lt_cb(self,msg):
+        print("Detection received: {}".format(msg.state))
         # Set default values for light ahead
         self.light_ahead       = None
         self.light_ahead_idx   = None

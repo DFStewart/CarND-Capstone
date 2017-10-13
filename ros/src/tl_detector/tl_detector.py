@@ -7,6 +7,8 @@ from styx_msgs.msg import Lane
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from light_classification.tl_classifier import TLClassifier
+from light_msgs.msg import UpcomingLight
+
 import tf
 import cv2
 import yaml
@@ -15,13 +17,11 @@ import os
 import math
 import numpy as np
 import glob
-
-from light_msgs.msg import UpcomingLight
+import datetime
 
 from tl_debug import TLDebug
 
-#################################
-# Build a dictionary for models
+##### Model constants ############################
 
 path_to_models = os.path.dirname(os.path.realpath(__file__)) + '/light_classification/models'
 
@@ -37,13 +37,17 @@ MODEL_DICT = {1: (path_to_models + '/graph_frcnn_resnet_sim_bosch.pb',
                   4)
               }
 
-##################
-# Set parameters
+##### Constants ###############################################################
 
+# Distance Threshold to the next traffic light in order to avoid processing of
+# the image in order to detect the color of the traffic light indication.
 VISIBLE_DISTANCE = 200
 
 # On/Off switch for classifier.
 CLF_ON = True
+
+# On/Off switch for enabling debug.
+DEBUG_ON = True
 
 # Use the predicted light state. 
 # Otherwise, use true light state from TrafficLightArray message.
@@ -55,12 +59,22 @@ SCORE_THRESHOLD = 0.5
 
 STATE_COUNT_THRESHOLD = 3
 
-##################
+# DISCARD_NUMBER_IMAGES = 8
 
+##### TLDetector Class ########################################################
 
 class TLDetector(object):
     def __init__(self):
+        # Initialization of the Node
+
         rospy.init_node('tl_detector')
+
+        # Get configuration of the Node
+        
+        config_string = rospy.get_param("/traffic_light_config")
+        self.config = yaml.load(config_string)
+
+        # Initialize properties
 
         self.pose = None
         self.waypoints = None
@@ -73,18 +87,22 @@ class TLDetector(object):
 
         self.lights = []
         self.all_stop_line_wps = None
+        self.stop_line_positions = self.config['stop_line_positions']
 
-        #The closest waypoint to car
+        # The closest waypoint to car
         self.car_position = None
 
-        config_string = rospy.get_param("/traffic_light_config")
-        self.config = yaml.load(config_string)
+        #self.discard_number_images = 0
 
         # Find whether simulator config or site config is introduced
+
+        self.is_running_simulator = False # By default is not in simulation
+        model_id = 2                      # By default uses the udacity real model
         if len(self.config['stop_line_positions']) > 1:
             model_id = 1
-        else:
-            model_id = 2
+            self.is_running_simulator = True
+
+        # Subscribe to the Topics
 
         sub1 = rospy.Subscriber('/current_pose', PoseStamped, self.pose_cb)
         sub2 = rospy.Subscriber('/base_waypoints', Lane, self.waypoints_cb)
@@ -98,7 +116,13 @@ class TLDetector(object):
         '''
         sub3 = rospy.Subscriber('/vehicle/traffic_lights', TrafficLightArray, self.traffic_cb)       
 
+        # Create the Publishers
+
         self.upcoming_red_light_pub = rospy.Publisher('/traffic_waypoint', Int32, queue_size=1)
+
+        self.upcoming_light_pub = rospy.Publisher('/upcoming_light', UpcomingLight, queue_size=1)
+
+        # Create OpneCv Bridge for Ros
 
         self.bridge = CvBridge()
 
@@ -110,21 +134,26 @@ class TLDetector(object):
             # Generate the model PD file
             self.prepare_model_file(ckpt)
 
+            # Initialize Classifier
             self.light_classifier = TLClassifier(ckpt, label_map, n_classes, SCORE_THRESHOLD)
             self.light_classifier_on = True
             print("Light classifier is running")
 
+        # Setup the transform listener for coordinates transformaton
+
         self.listener = tf.TransformListener()
 
-        #Publisher for UpcomingLight message
-        self.upcoming_light_pub = rospy.Publisher('/upcoming_light', UpcomingLight, queue_size=1)
+        # Setup the debug for the detector
 
-        # Debug Publisher
-        self.debug = TLDebug()
+        if DEBUG_ON:
+            self.debug = TLDebug()
+
+        # Subscribe to the Car Camera Image
 
         sub6 = rospy.Subscriber('/image_color', Image, self.image_cb)
 
         rospy.spin()
+
 
     def prepare_model_file(self, model_path):
         """Check if the model is in a single file or splitted in several files.
@@ -145,11 +174,19 @@ class TLDetector(object):
     def pose_cb(self, msg):
         self.pose = msg
 
+
     def waypoints_cb(self, waypoints):
         self.waypoints = waypoints
 
+        # Since we get the list of waypoints, now we can identify the waypoints
+        # where the stop lines are
+        if self.all_stop_line_wps == None and self.waypoints != None:
+            self.all_stop_line_wps = self.get_all_stop_line_wps(self.stop_line_positions)
+
+
     def traffic_cb(self, msg):
         self.lights = msg.lights
+
 
     def image_cb(self, msg):
         """Identifies red lights in the incoming camera image and publishes the index
@@ -159,6 +196,12 @@ class TLDetector(object):
             msg (Image): image from car-mounted camera
 
         """
+        # TODO: This is for the problem that happends when the classifier takes so much time
+        # and the images pile up. Verify if we need this with GPU.
+        # if self.discard_number_images > 0:
+        #     self.discard_number_images -= 1
+        #     return
+
         self.has_image = True
         self.camera_image = msg
 
@@ -222,6 +265,7 @@ class TLDetector(object):
     def get_closest_waypoint(self, pose):
         """Identifies the closest path waypoint to the given position
             https://en.wikipedia.org/wiki/Closest_pair_of_points_problem
+            http://rosettacode.org/wiki/Closest-pair_problem#Python
 
         Args:
             pose (Pose): position to match a waypoint to
@@ -231,8 +275,6 @@ class TLDetector(object):
 
         """
 
-        # Brute Force Searching (TODO: Try to reduce the number of operations by using divide and conquer)
-        # http://rosettacode.org/wiki/Closest-pair_problem#Python
         min_distance           = sys.maxsize
         nearest_waypoint_index = -1
         #print("Type of self.waypoints: %s" % type(self.waypoints))
@@ -360,22 +402,25 @@ class TLDetector(object):
 
         cv_image = self.bridge.imgmsg_to_cv2(self.camera_image, "rgb8")
 
-        x, y = self.project_to_image_plane(light.pose.pose.position)
+        #x, y = self.project_to_image_plane(light.pose.pose.position)
         #print("Projected point: (%s, %s)" %(x, y))
         
-        #TODO Prepare the image to be classified
-        #crop_image = cv_image[y-20:y+130, x-40:x+40]
-        #resized_image = cv2.resize(crop_img, (80, 150)) 
-
+        # TODO: We need to get the distance to the stop line. Check if we need this apart for the crop method.
         distance_car_tl = self.get_distance_between_poses(self.pose.pose, light.pose.pose) # Need the real distance
 
-        #Publishing Images and metadata for debug and dataset generator
-        if x != None and y != None:
-            self.debug.publish_debug_image(cv_image, distance_car_tl, x, y) # Publishing in /debug/image_tl Use 'rqt' to visualize the image
-            self.debug.publish_debug_image_metadata(cv_image, 0, y-20, x-40, y+130, x+40) # Publishing in /debug/image_tl_metadata
+        #TODO Prepare the image to be classified
+        cv_image = self.crop_image(cv_image, distance_car_tl)
+
+        #resized_image = cv2.resize(crop_img, (80, 150)) 
+
+        if DEBUG_ON: # and x != None and y != None:
+            self.debug.publish_debug_image(cv_image, distance_car_tl)  # Publishing in /debug/image_tl Use 'rqt' to visualize the image
 
         #Get classification
         if self.light_classifier_on is True:
+            # Gives central position of the image. This simulates the planar projection method.
+            x = int(cv_image.shape[0] / 2)
+            y = int(cv_image.shape[1] / 2)
             return self.light_classifier.get_classification(cv_image, (x, y))
 
         return TrafficLight.UNKNOWN
@@ -433,6 +478,44 @@ class TLDetector(object):
         return msg
 
 
+    def crop_image(self, image, distance):
+        """Crop the image based on distance
+
+        Args:
+            image   : image to crop
+            distance: distance to the stop line
+
+        Returns:
+            cropped image
+        """
+        result = np.copy(image)
+        print(distance)
+        if self.is_running_simulator:
+            # calculate top and bottom crop
+            top = 0
+            bottom = 600
+            if distance >= 150:
+                top = 530
+                bottom = 600
+            elif distance >= 55:
+                top = 340 + int((distance - 55.0) * ((530.0 - 340.0) / 95.0))
+                bottom = 520 + int((distance - 55.0 ) * ((600.0 - 520.0) / 95.0))
+            elif distance >= 27:
+                top = 0 + int((distance - 27.0) * (340.0 / 28.0))
+                bottom = 360 + int((distance - 27.0 ) * (520.0 - 360.0) / 28.0)
+            else:
+                top = 0
+                bottom = 400
+
+            result = result[top:bottom]
+         
+        else:
+            # In real carla car, the image contains the front of the car at the bottom of the image,
+            # so we can remove that part of the image.
+            result = result[0:740]
+
+        return result
+
     def process_traffic_lights(self):
         """Finds closest visible traffic light, if one exists, and determines its
             location and color
@@ -444,52 +527,65 @@ class TLDetector(object):
         """
         light = None
 
+        reaching_traffic_light = False
+
+        light_id           = -1
+        stop_line_wp_index = -1
+
         # List of positions that correspond to the line to stop in front of for a given intersection
         stop_line_positions = self.config['stop_line_positions']
 
         # Find the waypoint closest to car's current position
         if(self.pose):
-            position_tmp = self.get_closest_waypoint(self.pose.pose)
-            if position_tmp != -1:
-                self.car_position = position_tmp
+            closest_waypoint_to_car = self.get_closest_waypoint(self.pose.pose)
+            if closest_waypoint_to_car != -1:
+                self.car_position = closest_waypoint_to_car
 
-        #Find the closest waypoint for each traffic light
-        if self.all_stop_line_wps == None and self.waypoints != None:
-            self.all_stop_line_wps = self.get_all_stop_line_wps(stop_line_positions)
-        
-        #####Find the waypoint and index of the upcoming light
+        # Find the closest waypoint for each traffic light (this is removed since we do it when we get the waypoints)
+        # if self.all_stop_line_wps == None and self.waypoints != None:
+        #     self.all_stop_line_wps = self.get_all_stop_line_wps(stop_line_positions)
+
+        ### Find the waypoint and index of the upcoming traffic light
         # 1 - Check that we have traffic lights waypoints and car location
         if self.all_stop_line_wps != None and self.car_position != None:
             # Get the location and index of the upcoming nearest traffic light
-            stop_line_wp, light_id = self.get_upcoming_stop_line_wp(self.car_position, self.all_stop_line_wps)
+            stop_line_wp_index, light_id = self.get_upcoming_stop_line_wp(self.car_position, self.all_stop_line_wps)
             #print("Upcoming stop line waypoint and index: %s, %s" % (stop_line_wp, light_id))
 
             # Find the distance between the car and the upcoming light
-            if self.pose != None and self.lights != None:
-                distance_to_light = self.get_distance_between_poses(self.pose.pose, self.lights[light_id].pose.pose)
-
-                # Publish the message of UpcomingLight (including true light state)
-                # As Teaching Assistant noted in Slack, topic /vehicle/traffic_lights containing true light state
-                # will also be available and published on Carla in site.
-                upcoming_msg = self.generate_upcominglight_msg(stop_line_wp, light_id, self.lights[light_id].pose, self.lights[light_id].state)
-                self.upcoming_light_pub.publish(upcoming_msg)
-
+            if self.pose != None and stop_line_wp_index != None:
+                distance_to_stop_line = self.get_distance_between_poses(self.pose.pose, self.waypoints.waypoints[stop_line_wp_index].pose.pose)
+                
                 # Check if the car is in the range of VISIBLE_DISTANCE in order to proceed with the classification
-                if distance_to_light < VISIBLE_DISTANCE:
+                if distance_to_stop_line < VISIBLE_DISTANCE:
+                    reaching_traffic_light = True
                     light = self.lights[light_id]
 
-        # 2 - Check if light is available, then try to identify the color
-        if light:
-            # Use predicted light state
+                #print(distance_to_stop_line, VISIBLE_DISTANCE, reaching_traffic_light)
+            
+        # 2 - Check if we are reaching a traffic light, then try to identify the color
+        if reaching_traffic_light:
+        
+            # Predict the light state
             if USE_PREDICTION:
                 pred_state = self.get_light_state(light)
-                print("Predicted light state: %s" % pred_state)
-                return stop_line_wp, pred_state
+                
+                upcoming_msg = self.generate_upcominglight_msg(stop_line_wp_index, light_id, self.lights[light_id].pose, pred_state)
 
-            # Use true light state
-            return stop_line_wp, self.lights[light_id].state
+                self.upcoming_light_pub.publish(upcoming_msg)
+
+                #self.discard_number_images = DISCARD_NUMBER_IMAGES
+
+                return stop_line_wp_index, pred_state
+
+            # Use ground truth traffic light state to be send to the 
+            upcoming_msg = self.generate_upcominglight_msg(stop_line_wp_index, light_id, self.lights[light_id].pose, self.lights[light_id].state)
+            self.upcoming_light_pub.publish(upcoming_msg)
+            return stop_line_wp_index, self.lights[light_id].state
 
         return -1, TrafficLight.UNKNOWN
+
+##### Main ####################################################################
 
 if __name__ == '__main__':
     try:

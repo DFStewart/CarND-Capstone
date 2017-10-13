@@ -5,13 +5,17 @@ import numpy as np
 import tensorflow as tf
 from utils import label_map_util
 from utils import visualization_utils as vis_util
-import time
 import math
+import datetime
 
 from PIL import Image 
 import glob, sys
 import rospy
 
+from tl_debug import TLDebug
+
+# On/Off switch for enabling debug.
+DEBUG_ON = True
 
 class TLClassifier(object):
     def __init__(self, path_to_ckpt, path_to_label_map, num_classes, score_threshold):
@@ -20,6 +24,13 @@ class TLClassifier(object):
         # Default light state
         self.default_state = TrafficLight.UNKNOWN
         #self.default_state = 4 # Debug
+
+        # In order to filter out the mapping classes we are not using
+        # 1 => Green  (bosch) RED    (udacity)
+        # 2 => Red    (bosch) YELLOW (udacity)
+        # 3 => -----          GREEN (udacity)
+        # 7 => Yellow (bosch) ----
+        self.valid_classes = [1, 2, 3, 7]
 
         # Output image
         self.image_np_classified = None
@@ -67,6 +78,10 @@ class TLClassifier(object):
 
         print("Inference graph loaded")
 
+        # Debug Publisher
+        if DEBUG_ON:
+            self.debug = TLDebug()
+
 
     def dist_box_center_to_point(self, box, point):
         """
@@ -108,26 +123,31 @@ class TLClassifier(object):
             int: ID of traffic light color (specified in styx_msgs/TrafficLight)
 
         """
+        if DEBUG_ON:
+            start_time = datetime.datetime.now()
+
         # Preprocess image
         image_np_expanded = np.expand_dims(image, axis=0)
 
         # Run image through the network
-        time0 = time.time()
-
         with self.detection_graph.as_default():
             (boxes, scores, classes, num_detections) = self.sess.run(
                 [self.detection_boxes, self.detection_scores, 
                 self.detection_classes, self.num_detections],
                 feed_dict={self.image_tensor: image_np_expanded})
 
-        time1 = time.time()
-        #print("Time in milliseconds: %s" % ((time1 - time0) * 1000))
+        if DEBUG_ON:
+            #print(boxes)
+            #print(scores)
+            print("Detected Classes: {}".format(classes))
+            #print("num detections: %s" % num_detections)
 
         boxes = np.squeeze(boxes)
         scores = np.squeeze(scores)
         classes = np.squeeze(classes).astype(np.int32)
 
-        #print("num detections: %s" % num_detections)
+        # Initialize result with default value
+        result_state = self.default_state
 
         # Analyze light state from the detected boxes
         if num_detections[0] > 0:
@@ -138,19 +158,24 @@ class TLClassifier(object):
 
             # Iterate each box
             for i in range(boxes.shape[0]):
+                # filter the classes we are not interested in
+                if classes[i] not in self.valid_classes:
+                    continue
 
                 # If detection confidence on this box is above threshold,
                 # then we analyze and collect the state and box. 
                 if scores[i] > self.score_threshold:
                     class_name = self.category_index[classes[i]]['name']
-                    #print("Detected box: %s" % class_name)
+                    if DEBUG_ON:
+                        print("Evaluating Class: " + str(classes[i]) + " Score: " + str(scores[i]) + "Class Name: " + class_name)
 
+                    # Get the state based on class name (bosch and udacity)
                     state = TrafficLight.UNKNOWN
-                    if class_name == 'Red':
+                    if class_name == 'Red' or class_name == 'RED':
                         state = TrafficLight.RED
-                    elif class_name == 'Yellow':
+                    elif class_name == 'Yellow' or class_name == 'YELLOW':
                         state = TrafficLight.YELLOW
-                    elif class_name == 'Green':
+                    elif class_name == 'Green' or class_name == 'GREEN':
                         state = TrafficLight.GREEN
 
                     #Debug
@@ -166,12 +191,18 @@ class TLClassifier(object):
                     boxes_filtered.append(boxes[i])
             
             if len(states) == 0:            # if no state
-                return self.default_state
+                result_state = self.default_state
             elif len(states) == 1:          # if only one state
-                return states[0]
+                result_state = states[0]
             elif states[1:] == states[:-1]: # if all states are identical
-                return states[0]
+                result_state = states[0]
             else:                           # if multiple and different states
-                return self.vote_on_states(states, boxes_filtered, projection_point)
+                result_state = self.vote_on_states(states, boxes_filtered, projection_point)
 
-        return self.default_state
+        if DEBUG_ON:
+            self.debug.publish_classifier_image(image, result_state) # Publishing in /debug/image_classifier
+
+            end_time = datetime.datetime.now()
+            print("Predicted light state: {} in time: {}".format(result_state, end_time - start_time))
+        
+        return result_state

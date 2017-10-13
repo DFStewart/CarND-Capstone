@@ -21,6 +21,7 @@ class TLDebug(object):
     def __init__(self):
         self.debug_tl_image_pub = rospy.Publisher('debug/image_tl', Image, queue_size=1)
         self.debug_tl_metadata_pub = rospy.Publisher('debug/image_tl_metadata', TrafficLightMetadata, queue_size=1)
+        self.debug_tl_classifier_pub = rospy.Publisher('debug/image_classifier', Image, queue_size=1)
 
 
     def generate_image_msg(self, image):
@@ -51,32 +52,29 @@ class TLDebug(object):
         return msg
 
 
-    def draw_image(self, image, distance):
-        # cv2.line(image,(x-10,y-10),(x+10,y+10),(255,0,0),3)
-        # cv2.line(image,(x-10,y+10),(x+10,y-10),(255,0,0),3)
-        # cv2.line(image,(x-40,y-20),(x+40,y-20),(255,0,0),3)
-        # cv2.line(image,(x-40,y-20),(x-40,y+130),(255,0,0),3)
-        # cv2.line(image,(x+40,y-20),(x+40,y+130),(255,0,0),3)
-        # cv2.line(image,(x-40,y+130),(x+40,y+130),(255,0,0),3)
-        
+    def draw_image(self, image, distance, x, y):
         font = cv2.FONT_HERSHEY_TRIPLEX
-        cv2.putText(image, 'Distance Next Stop Line => {}'.format(distance), (10, 30), font, 1, (0, 255, 0))
-        #cv2.putText(image, '(X, Y) => {} {}'.format(x, y), (10, 60), font, 1, (0, 255, 0))
-        # if 0 <= x <= 800 and 0 <= y <= 600 and distance < 200.0:
-        #     cv2.putText(image, 'Traffic Light in Range', (10, 90), font, 1, (0, 255, 0))
-        # else:
-        #     cv2.putText(image, 'No Traffic Light in Image', (10, 90), font, 1, (0, 0, 255))
+        cv2.putText(image, 'Distance Next TL => {}'.format(distance), (10, 30), font, 1, (0, 255, 0))
 
 
-    def publish_debug_image(self, image, distance):
-        new_image = np.copy(image)
-        self.draw_image(new_image, distance)
-        msg_image = self.generate_image_msg(new_image)
+    def draw_image_classification(self, image, classification):
+        font = cv2.FONT_HERSHEY_TRIPLEX
+        cv2.putText(image, 'Classification => {}'.format(classification), (10, 30), font, 1, (0, 255, 0))
+
+
+    def publish_debug_image(self, image, distance, x, y):
+        self.draw_image(image, distance, x, y)
+        msg_image = self.generate_image_msg(image)
         self.debug_tl_image_pub.publish(msg_image)
 
 
     def publish_debug_image_metadata(self, image, color, top, left, bottom, right):
-        new_image = np.copy(image)
         msg_rectangle = self.generate_rectangle_msg(top, left, bottom, right)
-        msg_metadata = self.generate_image_metadata_msg(new_image, msg_rectangle, color)
+        msg_metadata = self.generate_image_metadata_msg(image, msg_rectangle, color)
         self.debug_tl_metadata_pub.publish(msg_metadata)
+
+
+    def publish_classifier_image(self, image, classification):
+        self.draw_image_classification(image, classification)
+        msg_image = self.generate_image_msg(image)
+        self.debug_tl_classifier_pub.publish(msg_image)
