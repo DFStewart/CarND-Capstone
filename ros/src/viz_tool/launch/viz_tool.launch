@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<launch>
+    <node pkg="viz_tool" type="viz_tool.py" name="viz_tool" output="screen"/>
+</launch>

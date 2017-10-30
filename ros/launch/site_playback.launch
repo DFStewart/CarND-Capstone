@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- ROS Bag Playback -->
+    <node pkg="rosbag" type="play" name="player" output="screen" args="--clock /home/honeywell/Desktop/UDACITY/Term3/MyRepoDuplicate/CarND-Capstone/rosbags/Carla1.bag"/>
+    
+    <!--Waypoint Visualization Node -->
+    <!--<include file="$(find wpt_visualization)/launch/wpt_visualization.launch"/>-->
+    
+    <!--Viz Tool -->
+    <include file="$(find viz_tool)/launch/viz_tool.launch"/>
+    
+</launch>

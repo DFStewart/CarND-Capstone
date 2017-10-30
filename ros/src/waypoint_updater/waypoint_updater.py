@@ -28,7 +28,7 @@ TODO (for Yousuf and Aaron): Stopline location for each traffic light.
 LOOKAHEAD_WPS = 30       # Number of waypoints published
 SPEED_MPH     = 10.      # Forward speed in miles per hour
 STOP_LINE     = 29.      # Distance in meters to stop in front of stoplight, corresponds to white stop line
-STOP_DIST_ERR = 12.       # Distance to start applying brakes ahead of STOP_LINE
+STOP_DIST_ERR = 20.#12.      # Distance to start applying brakes ahead of STOP_LINE
 LL_WPT_SEARCH = 3        # Number of waypoints behind to search over to detect new waypoint ahead from previous nearest waypoint
 UL_WPT_SEARCH = 20       # Number of waypoints ahead to search over to detect new waypoint ahead from previous nearest waypoint
 
@@ -113,6 +113,8 @@ class WaypointUpdater(object):
             idx = 0
             fwpt_idx = 0
             # Fill target speeds
+            if DEBUG_TGTSPD and math.fabs(self.dist2light_m - STOP_LINE) < STOP_DIST_ERR and self.target_speed_mps > 0.0:
+                print('-------------------------------')
             for wpt in self.final_wpts.waypoints:
                 if False:
                     print('Final WPT IDX,X,Y',fwpt_idx,wpt.pose.pose.position.x,wpt.pose.pose.position.y)
@@ -125,27 +127,28 @@ class WaypointUpdater(object):
                 dist2stopline   = self.dist2light_m - STOP_LINE
                 in_intersection = dist2stopline < -2. # arbitrary tuned number
                 start_braking   = math.fabs(dist2stopline) < STOP_DIST_ERR 
-                if DEBUG_TGTSPD:
-                    print('dist2stopline',dist2stopline)
-                    print('---------------------------')
                 if start_braking and not in_intersection:
                     # For each waypoint compute in order:
                         # Distance to the stoplight from waypoint
                         # Distance from waypoint to stopline in front of stoplight
                         # Desired deceleration
                         # Final velocity command for waypoint
-                    # Find the distance from the wpt to the stoplight
+                    # Find the distance from the final wpt to the stoplight
                     dis_wpt2light = math.sqrt((wpt.pose.pose.position.x - self.light_ahead.pose.position.x)**2 + (wpt.pose.pose.position.y-self.light_ahead.pose.position.y)**2)
                     # Find the desired final stop position of the car
                     pos_stopline = dis_wpt2light - STOP_LINE #stop at the white line in front of the light
                     vel_i = self.target_speed_mps
                     # If velocity is small then dont decelerate
-                    if vel_i < 5.0:
-                        vel_i = 0.
-                        decel_mpss = 0
+                    #if vel_i < 5.0:
+                    #    vel_i = 0.
+                    #    decel_mpss = 0
+                    #else:
+                    #    decel_mpss = -1.#-1.*(vel_i * vel_i / pos_stopline)/2. # Find the required deceleration
+                    
+                    if pos_stopline > 0.:
+                        decel_mpss = -1.*vel_i/pos_stopline
                     else:
-                        decel_mpss = -1.*(vel_i * vel_i / pos_stopline)/2. # Find the required deceleration
-                   
+                        decel_mpss = -1.
                     # Check if we are already past the white line
                     if pos_stopline < 0.0:
                         pos_stopline = 0.0
@@ -155,13 +158,11 @@ class WaypointUpdater(object):
                         if vel_sq < 0.0:
                             vel_sq = 0.0
                         self.target_speed_mps = math.sqrt(vel_sq)
-                    
-                    # Prevent negative target speeds
-                    if self.target_speed_mps < 0.0:
-                        self.target_speed_mps = 0.0
                         
-                    if DEBUG_TGTSPD and math.fabs(self.dist2light_m - STOP_LINE) < STOP_DIST_ERR:
+                    if DEBUG_TGTSPD and math.fabs(self.dist2light_m - STOP_LINE) < STOP_DIST_ERR and self.target_speed_mps > 0.0:
+                        print('---') 
                         print('TGT SPDS :: Final WPT IDX      ', idx) 
+                        print('TGT SPDS :: Light Ahead IDX    ', self.light_ahead_idx)
                         print('TGT SPDS :: Target Speed       ', self.target_speed_mps) 
                         print('TGT SPDS :: Pos to Stop Line   ', pos_stopline) 
                         print('TGT SPDS :: Dist car2light     ', self.dist2light_m)
@@ -203,7 +204,6 @@ class WaypointUpdater(object):
         pass
         
     def upcoming_lt_cb(self,msg):
-        print("Detection received: {}".format(msg.state))
         # Set default values for light ahead
         self.light_ahead       = None
         self.light_ahead_idx   = None

@@ -489,7 +489,7 @@ class TLDetector(object):
             cropped image
         """
         result = np.copy(image)
-        print(distance)
+        #print(distance)
         if self.is_running_simulator:
             # calculate top and bottom crop
             top = 0

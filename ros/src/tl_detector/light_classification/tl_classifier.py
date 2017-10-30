@@ -15,7 +15,7 @@ import rospy
 from tl_debug import TLDebug
 
 # On/Off switch for enabling debug.
-DEBUG_ON = True
+DEBUG_ON = False
 
 class TLClassifier(object):
     def __init__(self, path_to_ckpt, path_to_label_map, num_classes, score_threshold):
