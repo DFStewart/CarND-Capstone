@@ -20,15 +20,12 @@ Once you have created dbw_node, you will update this node to use the status of t
 Please note that our simulator also provides the exact location of traffic lights and their
 current status in `/vehicle/traffic_lights` message. You can use this message to build this node
 as well as to verify your TL classifier.
-
-TODO (for Yousuf and Aaron): Stopline location for each traffic light.
 '''
 
 # TUNABLE PARAMETERS
 LOOKAHEAD_WPS = 30       # Number of waypoints published
 SPEED_MPH     = 10.      # Forward speed in miles per hour
-STOP_LINE     = 29.      # Distance in meters to stop in front of stoplight, corresponds to white stop line
-STOP_DIST_ERR = 20.#12.      # Distance to start applying brakes ahead of STOP_LINE
+STOP_DIST_ERR = 20.      # Distance to start applying brakes ahead of STOP_LINE
 LL_WPT_SEARCH = 3        # Number of waypoints behind to search over to detect new waypoint ahead from previous nearest waypoint
 UL_WPT_SEARCH = 20       # Number of waypoints ahead to search over to detect new waypoint ahead from previous nearest waypoint
 
@@ -41,7 +38,7 @@ DEBUG_TOPICS  = True     # Enable debug output topics
 SIMULATE_TL   = False    # True = Simulate traffic light positions with /vehicle/traffic_lights, False = use tl_detector /upcoming_light topic
 DEBUG_TLDET   = False    # True = Print TL_DETECTOR topic debug information
 DEBUG_TLSIM   = False    # True = Print traffic light information from simulator data debug information
-DEBUG_TGTSPD  = False    # True = Print debug information for target velocity calculations
+DEBUG_TGTSPD  = True     # True = Print debug information for target velocity calculations
 DEBUG_SEARCH  = False    # True = Pring debug information on searching the base_waypoints for our current position
 
 class WaypointUpdater(object):
@@ -59,8 +56,8 @@ class WaypointUpdater(object):
         if SIMULATE_TL:
             rospy.Subscriber('/vehicle/traffic_lights', TrafficLightArray, self.sim_traffic_cb, queue_size=1) 
         else:
-            rospy.Subscriber('/upcoming_light',UpcomingLight,self.upcoming_lt_cb,queue_size=1)
-            #rospy.Subscriber('/traffic_waypoint',Int32,self.traffic_cb,queue_size=1)
+            #rospy.Subscriber('/upcoming_light',UpcomingLight,self.upcoming_lt_cb,queue_size=1)
+            rospy.Subscriber('/traffic_waypoint',Int32,self.traffic_cb)
         
         # Setup Publishers
         self.final_waypoints_pub = rospy.Publisher('final_waypoints', Lane, queue_size=1)
@@ -72,6 +69,7 @@ class WaypointUpdater(object):
         self.pos_x            = 0.
         self.pos_y            = 0.
         self.pos_z            = 0.
+        self.light_ahead_idx  = -1.
         self.waypoints        = None
         self.wpt_ahead_idx    = None       
         self.wpt_ahead        = None
@@ -81,6 +79,7 @@ class WaypointUpdater(object):
         self.search_range     = None
         self.target_speed_mps = SPEED_MPH*MPH2MPS
         self.base_wpt_spd_mps = SPEED_MPH*MPH2MPS
+        self.current_velocity = SPEED_MPH*MPH2MPS
         self.dist2light_m     = 9999.
         self.prev_wpt_ahead_idx = 0.
         rospy.spin()
@@ -109,77 +108,76 @@ class WaypointUpdater(object):
                 idx_past_0 = LOOKAHEAD_WPS - idx_prev_0
                 for idx in range(idx_past_0):
                     self.final_wpts.waypoints.append(self.waypoints[idx])
-                        
+
+            # Find the index of the stopline in the final waypoints list           
+            self.num_wpts_to_stopline = self.light_ahead_idx - self.wpt_ahead_idx
+            if self.num_wpts_to_stopline < 0:
+                self.num_wpts_to_stopline = 30.
+            if self.num_wpts_to_stopline == 0:
+                self.num_wpts_to_stopline = 1.
+            if self.num_wpts_to_stopline > 30:
+                self.num_wpts_to_stopline = 30.
             idx = 0
-            fwpt_idx = 0
-            # Fill target speeds
-            if DEBUG_TGTSPD and math.fabs(self.dist2light_m - STOP_LINE) < STOP_DIST_ERR and self.target_speed_mps > 0.0:
-                print('-------------------------------')
-            for wpt in self.final_wpts.waypoints:
-                if False:
-                    print('Final WPT IDX,X,Y',fwpt_idx,wpt.pose.pose.position.x,wpt.pose.pose.position.y)
-                    fwpt_idx = fwpt_idx + 1
-            
+            fwpt_idx = 0            
+            wpt_ahead    = self.final_wpts.waypoints[0]
+            if self.light_ahead_idx >= 0:
+                wpt_stopline = self.waypoints[self.light_ahead_idx]
+                dis_wptahead2stopline = math.sqrt((wpt_ahead.pose.pose.position.x - wpt_stopline.pose.pose.position.x)**2 + (wpt_ahead.pose.pose.position.y-wpt_stopline.pose.pose.position.y)**2)
+            else:
+                dis_wptahead2stopline = 999.
+
+            self.target_speed_mps = self.current_velocity
+            vel_plan = []
+            dist_plan= []
+            for idx,wpt in enumerate(self.final_wpts.waypoints):           
                 # Two Checks before we set deceleration profile:
                 # 1) Check if we are NOT past the white stop line in the middle of the intersection => dont stop in middle
                 # 2) Check if we close enough to the stop line to start braking
                 # If either are false then just continue at normal speed
-                dist2stopline   = self.dist2light_m - STOP_LINE
-                in_intersection = dist2stopline < -2. # arbitrary tuned number
-                start_braking   = math.fabs(dist2stopline) < STOP_DIST_ERR 
-                if start_braking and not in_intersection:
+                #in_intersection = dis_wptahead2stopline < 3. # arbitrary tuned number
+                start_braking   = math.fabs(dis_wptahead2stopline) < STOP_DIST_ERR 
+                if start_braking: #and not in_intersection:
                     # For each waypoint compute in order:
                         # Distance to the stoplight from waypoint
                         # Distance from waypoint to stopline in front of stoplight
                         # Desired deceleration
                         # Final velocity command for waypoint
                     # Find the distance from the final wpt to the stoplight
-                    dis_wpt2light = math.sqrt((wpt.pose.pose.position.x - self.light_ahead.pose.position.x)**2 + (wpt.pose.pose.position.y-self.light_ahead.pose.position.y)**2)
+                    dis_wpt2stopline = math.sqrt((wpt.pose.pose.position.x - wpt_stopline.pose.pose.position.x)**2 + (wpt.pose.pose.position.y-wpt_stopline.pose.pose.position.y)**2)
                     # Find the desired final stop position of the car
-                    pos_stopline = dis_wpt2light - STOP_LINE #stop at the white line in front of the light
-                    vel_i = self.target_speed_mps
-                    # If velocity is small then dont decelerate
-                    #if vel_i < 5.0:
-                    #    vel_i = 0.
-                    #    decel_mpss = 0
-                    #else:
-                    #    decel_mpss = -1.#-1.*(vel_i * vel_i / pos_stopline)/2. # Find the required deceleration
-                    
-                    if pos_stopline > 0.:
-                        decel_mpss = -1.*vel_i/pos_stopline
-                    else:
-                        decel_mpss = -1.
-                    # Check if we are already past the white line
-                    if pos_stopline < 0.0:
-                        pos_stopline = 0.0
+                    self.target_speed_mps = self.target_speed_mps-2.0*1./self.num_wpts_to_stopline*dis_wpt2stopline
+                    if self.target_speed_mps < 3.0: # if the velocity is small, just command vel to 0
                         self.target_speed_mps = 0.0
-                    else: 
-                        vel_sq = vel_i * vel_i + 2.*decel_mpss*pos_stopline
-                        if vel_sq < 0.0:
-                            vel_sq = 0.0
-                        self.target_speed_mps = math.sqrt(vel_sq)
-                        
-                    if DEBUG_TGTSPD and math.fabs(self.dist2light_m - STOP_LINE) < STOP_DIST_ERR and self.target_speed_mps > 0.0:
-                        print('---') 
-                        print('TGT SPDS :: Final WPT IDX      ', idx) 
-                        print('TGT SPDS :: Light Ahead IDX    ', self.light_ahead_idx)
-                        print('TGT SPDS :: Target Speed       ', self.target_speed_mps) 
-                        print('TGT SPDS :: Pos to Stop Line   ', pos_stopline) 
-                        print('TGT SPDS :: Dist car2light     ', self.dist2light_m)
-                        print('TGT SPDS :: Dist wpt2light     ', dis_wpt2light)
-                        idx = idx + 1  
-                    
+                    if idx >= self.num_wpts_to_stopline:# if the final wpts are ahead of the stopline set the commanded vel to 0
+                         self.target_speed_mps = 0.0
+                    if idx < self.num_wpts_to_stopline and dis_wpt2stopline < 2.: # if the stopline is 2m ahead just stop
+                         self.target_speed_mps = 0.0
+                    braking = self.current_velocity > 1e-2                    
                 else:
                     # Car goes at normal speed
                     self.target_speed_mps = self.base_wpt_spd_mps #SPEED_MPH*MPH2MPS
-                    
+                    braking = False
+                    dis_wpt2stopline = 999. 
+                
                 # Set speeds in waypoint list
                 wpt.twist.twist.linear.x = self.target_speed_mps
-                    
+                vel_plan.append(self.target_speed_mps) # for debugging 
+                dist_plan.append(dis_wpt2stopline)                  
+
             #Publish final waypoints
             self.final_wpts.header.stamp    = rospy.Time.now()
             self.final_waypoints_pub.publish(self.final_wpts)
             
+            if DEBUG_TGTSPD and braking:
+                #print('Distance Plan: {0:.1f}--{1:.1f}--{2:.1f}--{3:.1f}--{4:.1f}--{5:.1f}--{6:.1f}--{7:.1f}--{8:.1f}--{9:.1f}--{10:.1f}--{11:.1f}--{12:.1f}--{13:.1f}--{14:.1f}--{15:.1f}--{16:.1f}--{17:.1f}--{18:.1f}--{19:.1f}--{20:.1f}--{21:.1f}--{22:.1f}--{23:.1f}--{24:.1f}--{25:.1f}--{26:.1f}--{27:.1f}--{28:.1f}--{29:.1f}'.format(\
+                #dist_plan[0], dist_plan[1],dist_plan[2],dist_plan[3],dist_plan[4],dist_plan[5],dist_plan[6],dist_plan[7],dist_plan[8],dist_plan[9],dist_plan[10],\
+                #dist_plan[11],dist_plan[12],dist_plan[13],dist_plan[14],dist_plan[15],dist_plan[16],dist_plan[17],dist_plan[18],dist_plan[19],dist_plan[20],\
+                #dist_plan[21],dist_plan[22],dist_plan[23],dist_plan[24],dist_plan[25],dist_plan[26],dist_plan[27],dist_plan[28],dist_plan[29]))  
+                print('Velocity Plan:  {0:.1f}--{1:.1f}--{2:.1f}--{3:.1f}--{4:.1f}--{5:.1f}--{6:.1f}--{7:.1f}--{8:.1f}--{9:.1f}--{10:.1f}--{11:.1f}--{12:.1f}--{13:.1f}--{14:.1f}--{15:.1f}--{16:.1f}--{17:.1f}--{18:.1f}--{19:.1f}--{20:.1f}--{21:.1f}--{22:.1f}--{23:.1f}--{24:.1f}--{25:.1f}--{26:.1f}--{27:.1f}--{28:.1f}--{29:.1f}'.format(\
+                vel_plan[0],vel_plan[1],vel_plan[2],vel_plan[3],vel_plan[4],vel_plan[5],vel_plan[6],vel_plan[7],vel_plan[8],vel_plan[9],vel_plan[10],\
+                vel_plan[11],vel_plan[12],vel_plan[13],vel_plan[14],vel_plan[15],vel_plan[16],vel_plan[17],vel_plan[18],vel_plan[19],vel_plan[20],\
+                vel_plan[21],vel_plan[22],vel_plan[23],vel_plan[24],vel_plan[25],vel_plan[26],vel_plan[27],vel_plan[28],vel_plan[29]))         
+
             #Topics to publish for debugging
             if DEBUG_TOPICS:
                 self.debug_currpos                  = PoseStamped()
@@ -197,7 +195,6 @@ class WaypointUpdater(object):
         self.pos_z          = msg.pose.position.z
         self.current_orient = msg.pose.orientation
         self.loop();
-        
         if False:
             print("WAYPOINT UPDATER :: Curr Pos  ","x: ",self.pos_x, "y: ", self.pos_y)
         
@@ -222,8 +219,7 @@ class WaypointUpdater(object):
         pass
     
     def traffic_cb(self,msg):
-        # We are already getting this from the /upcoming_light topic
-        # self.light_ahead_idx = msg.data
+        self.light_ahead_idx = msg.data
         pass
 
     def sim_traffic_cb(self, msg):
@@ -273,7 +269,7 @@ class WaypointUpdater(object):
     # Find the nearest waypoint ahead based on current position and bearing to next wpt
     def find_next_waypoint(self):
         closestlen = 9999999
-        # Define a range to search for our current position
+        # Define a range to search for our current positioncurrent_velocity
         self.search_range = range(len(self.waypoints))
                 
         # Narrow the search range so we don't need to search the whole \base_waypoints set
@@ -374,7 +370,7 @@ class WaypointUpdater(object):
         
     # When a message is recieved from /current_velocity topic store it
     def CurrVel_cb(self, msg):
-        self.current_velocity = msg.twist
+        self.current_velocity = msg.twist.linear.x
 
 if __name__ == '__main__':
     try:
